@@ -274,7 +274,7 @@ class ZeroAggregator(Aggregator):
                         pose_encoding=pose_encoding, register_shape = register_token.shape, P_old = P_old
                     )
                 elif attn_type == "global":
-                    tokens, global_idx, global_intermediates = self._process_global_attention(
+                    tokens, global_idx, global_intermediates, _ = self._process_global_attention(
                         tokens, B, S, P, C, global_idx, pos=pos
                     )
                 else:
@@ -403,7 +403,7 @@ class ZeroAggregator(Aggregator):
                         pose_encoding=pose_encoding, register_shape = register_token.shape, P_old = P_old
                     )
                 elif attn_type == "global":
-                    tokens, global_idx, global_intermediates = self._process_global_attention(
+                    tokens, global_idx, global_intermediates, _ = self._process_global_attention(
                         tokens, B, S, P, C, global_idx, pos=pos
                     )
                 else:

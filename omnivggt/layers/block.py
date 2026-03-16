@@ -78,7 +78,7 @@ class Block(nn.Module):
 
         self.sample_drop_ratio = drop_path
 
-    def forward(self, x: Tensor, pos=None) -> Tensor:
+    def forward(self, x: Tensor, pos=None, return_kv=False):
         def attn_residual_func(x: Tensor, pos=None) -> Tensor:
             return self.ls1(self.attn(self.norm1(x), pos=pos))
 
@@ -102,6 +102,11 @@ class Block(nn.Module):
             x = x + self.drop_path1(attn_residual_func(x, pos=pos))
             x = x + self.drop_path1(ffn_residual_func(x))  # FIXME: drop_path2
         else:
+            if return_kv:
+                attn_out, k, v = self.attn(self.norm1(x), pos=pos, return_kv=True)
+                x = x + self.ls1(attn_out)
+                x = x + ffn_residual_func(x)
+                return x, k, v
             x = x + attn_residual_func(x, pos=pos)
             x = x + ffn_residual_func(x)
         return x

@@ -188,33 +188,37 @@ class Aggregator(nn.Module):
             # if hasattr(self.patch_embed, "mask_token"):
             #     self.patch_embed.mask_token.requires_grad_(False)
             
-            if patch_embed == "dinov2_vitl14_reg":
-                dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg')
-                self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=False)
-            elif patch_embed == "dinov2_vitb14_reg":
-                dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14_reg')
-                self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=True)
-            elif patch_embed == "dinov2_vits14_reg":
-                dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg')
-                self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=True)
-            elif patch_embed == "dinov2_vitg2_reg":
-                dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg2_reg')
-                self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=True)
+            # if patch_embed == "dinov2_vitl14_reg":
+            #     dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg')
+            #     self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=False)
+            # elif patch_embed == "dinov2_vitb14_reg":
+            #     dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14_reg')
+            #     self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=True)
+            # elif patch_embed == "dinov2_vits14_reg":
+            #     dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg')
+            #     self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=True)
+            # elif patch_embed == "dinov2_vitg2_reg":
+            #     dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg2_reg')
+            #     self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=True)
                 
 
     def forward(
         self,
         images: torch.Tensor,
-    ) -> Tuple[List[torch.Tensor], int]:
+        return_global_kv: bool = False,
+    ):
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
                 B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
+            return_global_kv: If True, also return the K,V tensors from each global block's
+                attention layer as a list of (K, V) tuples.
 
         Returns:
-            (list[torch.Tensor], int):
+            (list[torch.Tensor], int) or (list[torch.Tensor], int, list[tuple[Tensor, Tensor]]):
                 The list of outputs from the attention blocks,
-                and the patch_start_idx indicating where patch tokens begin.
+                the patch_start_idx indicating where patch tokens begin,
+                and optionally the global KV cache.
         """
         B, S, C_in, H, W = images.shape
 
@@ -255,6 +259,7 @@ class Aggregator(nn.Module):
         frame_idx = 0
         global_idx = 0
         output_list = []
+        global_kv_cache = []
 
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
@@ -263,9 +268,11 @@ class Aggregator(nn.Module):
                         tokens, B, S, P, C, frame_idx, pos=pos
                     )
                 elif attn_type == "global":
-                    tokens, global_idx, global_intermediates = self._process_global_attention(
-                        tokens, B, S, P, C, global_idx, pos=pos
+                    tokens, global_idx, global_intermediates, kv_pairs = self._process_global_attention(
+                        tokens, B, S, P, C, global_idx, pos=pos,
+                        return_kv=return_global_kv
                     )
+                    global_kv_cache.extend(kv_pairs)
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
@@ -277,6 +284,8 @@ class Aggregator(nn.Module):
         del concat_inter
         del frame_intermediates
         del global_intermediates
+        if return_global_kv:
+            return output_list, self.patch_start_idx, global_kv_cache
         return output_list, self.patch_start_idx
 
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
@@ -310,7 +319,8 @@ class Aggregator(nn.Module):
         return tokens, frame_idx, intermediates
 
     def _process_global_attention(self, tokens, B, S, P, C, global_idx,
-                                  pos=None, pose_encoding=None, depth_encoding=None):
+                                  pos=None, pose_encoding=None, depth_encoding=None,
+                                  return_kv=False):
         """
         Process global attention blocks. We keep tokens in shape (B, S*P, C).
         """
@@ -321,11 +331,15 @@ class Aggregator(nn.Module):
             pos = pos.view(B, S, P, 2).view(B, S * P, 2)
 
         intermediates = []
+        kv_pairs = []
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
             blk = self.global_blocks[global_idx]   
-            if self.use_checkpoint and self.training:
+            if return_kv:
+                tokens, k, v = blk(tokens, pos=pos, return_kv=True)
+                kv_pairs.append((k, v))
+            elif self.use_checkpoint and self.training:
                 tokens = checkpoint(
                     lambda inp, p: blk(inp, pos=p, ),        
                     tokens,
@@ -338,7 +352,7 @@ class Aggregator(nn.Module):
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
-        return tokens, global_idx, intermediates
+        return tokens, global_idx, intermediates, kv_pairs
     
 def slice_expand_and_flatten(token_tensor, B, S):
     """
